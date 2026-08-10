@@ -209,15 +209,14 @@
   <div class="scan-flash" id="scan-flash"></div>
   <div class="camera-placeholder" id="camera-placeholder">
     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/></svg>
-    <p>点击「启动扫描」打开摄像头</p>
+    <p>点击「扫描」打开摄像头</p>
     <p style="font-size:12px;color:#999">将摄像头对准面单条码/二维码</p>
   </div>
 </div>
 
 <!-- 控制按钮 -->
 <div class="controls">
-  <button class="primary" id="btn-start">▶ 启动扫描</button>
-  <button id="btn-stop" disabled>⏹ 停止</button>
+  <button class="primary" id="btn-start">▶ 扫描</button>
   <button id="btn-torch-toggle" disabled>🔦 闪光灯</button>
 </div>
 <div class="controls">
@@ -239,7 +238,7 @@
   <table>
     <thead>
       <tr>
-        <th></th>
+        <th><input type="checkbox" id="check-all" title="全选/取消全选"></th>
         <th>日期</th>
         <th>物流单号</th>
         <th>备注</th>
