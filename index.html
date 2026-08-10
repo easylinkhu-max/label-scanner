@@ -37,11 +37,12 @@
     display: flex; align-items: center; gap: 8px;
   }
   header h1 { font-size: 18px; font-weight: 600; flex: 1; }
-  /* 摄像头区域 */
+  /* 摄像头区域：扫描时固定在视口上部（sticky），缩小高度保留 20% 上下冗余 */
   .camera-section {
-    position: relative;
+    position: sticky; top: 48px; z-index: 50;
     background: #000;
     aspect-ratio: 4/3;
+    max-height: 230px;
     overflow: hidden;
   }
   #video {
@@ -196,6 +197,31 @@
     background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
     background-repeat: no-repeat; background-position: right 10px center;
   }
+  /* 设置模态 */
+  .modal {
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(0,0,0,0.55);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .modal-box {
+    background: #fff; border-radius: 12px; padding: 16px;
+    max-width: 340px; width: 90%; max-height: 80vh; overflow-y: auto;
+  }
+  .modal-box h3 { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+  .set-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; font-size: 13px; }
+  .set-row input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; }
+  .set-field { display: block; margin: 8px 0; font-size: 12px; color: var(--muted); }
+  .set-field input {
+    width: 100%; margin-top: 4px; padding: 8px;
+    border: 1px solid var(--border); border-radius: 6px; font-size: 13px;
+    color: var(--text);
+  }
+  .modal-actions { display: flex; gap: 8px; margin-top: 14px; }
+  .modal-actions button {
+    flex: 1; padding: 9px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--card); font-size: 13px; cursor: pointer;
+  }
+  .modal-actions #btn-settings-save { background: var(--accent); color: #fff; border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -227,17 +253,17 @@
 <div class="controls">
   <button class="primary" id="btn-start">▶ 扫描</button>
   <button id="btn-torch-toggle" disabled>🔦 闪光灯</button>
-  <select id="region-select" title="物流单号地区规则">
-    <option value="">地区: 无</option>
-    <option value="generic">通用</option>
-    <option value="PH">🇵🇭 菲律宾 PH</option>
-  </select>
 </div>
 <div class="controls">
   <button id="btn-copy">📋 复制单号</button>
   <button id="btn-export">📊 导出CSV</button>
   <button id="btn-add-manual">✏ 新建</button>
   <button class="danger" id="btn-clear">🗑 删除</button>
+  <select id="region-select" title="地区规则">
+    <option value="generic">通用</option>
+    <option value="PH" selected>菲律宾</option>
+  </select>
+  <button id="btn-settings">⚙ 设置</button>
 </div>
 
 <!-- 统计 -->
@@ -253,6 +279,7 @@
     <thead>
       <tr>
         <th><input type="checkbox" id="check-all" title="全选/取消全选"></th>
+        <th>#</th>
         <th>日期</th>
         <th>物流单号</th>
         <th>备注</th>
@@ -266,6 +293,23 @@
 
 <div class="toast hidden" id="toast"></div>
 
-<script src="app.js?v=5"></script>
+<!-- 设置模态 -->
+<div class="modal hidden" id="settings-modal">
+  <div class="modal-box">
+    <h3>设置</h3>
+    <div class="set-row"><label class="set-label">本地 OCR 兜底（Tesseract.js，按需加载）</label><input type="checkbox" id="set-ocr" checked></div>
+    <div class="set-row"><label class="set-label">AI 视觉兜底（图片将上传到配置的服务）</label><input type="checkbox" id="set-ai"></div>
+    <div class="set-field"><label>API Base URL</label><input type="text" id="set-base" placeholder="https://…/v1"></div>
+    <div class="set-field"><label>API Key</label><input type="password" id="set-key" placeholder="sk-…"></div>
+    <div class="set-field"><label>模型名称</label><input type="text" id="set-model" placeholder="gpt-4o-mini"></div>
+    <div class="modal-actions">
+      <button id="btn-settings-save">保存</button>
+      <button id="btn-settings-test">测试连接</button>
+      <button id="btn-settings-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js?v=7"></script>
 </body>
 </html>
