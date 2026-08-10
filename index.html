@@ -187,6 +187,15 @@
   .toast.hidden { opacity: 0; pointer-events: none; }
   .hidden { display: none !important; }
   .row-check { width: 18px; height: 18px; cursor: pointer; }
+  #region-select {
+    flex: 1; min-width: 120px;
+    padding: 10px 8px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--card); font-size: 14px;
+    -webkit-appearance: none; appearance: none;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center;
+  }
 </style>
 </head>
 <body>
@@ -218,6 +227,11 @@
 <div class="controls">
   <button class="primary" id="btn-start">▶ 扫描</button>
   <button id="btn-torch-toggle" disabled>🔦 闪光灯</button>
+  <select id="region-select" title="物流单号地区规则">
+    <option value="">地区: 无</option>
+    <option value="generic">通用</option>
+    <option value="PH">🇵🇭 菲律宾 PH</option>
+  </select>
 </div>
 <div class="controls">
   <button id="btn-copy">📋 复制单号</button>
@@ -252,6 +266,6 @@
 
 <div class="toast hidden" id="toast"></div>
 
-<script src="app.js?v=4"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>
