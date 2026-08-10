@@ -8,6 +8,11 @@
 // ---------- 常量 ----------
 
 const STORAGE_KEY = 'labelScannerResults';
+const SETTINGS_KEY = 'labelScannerSettings';
+const FOCUS_WAIT_MS = 3000;      // 扫描前手动对焦等待
+const OCR_TRIGGER_FRAMES = 12;   // 连续无结果帧数触发 OCR（约 0.4-0.8s）
+const OCR_MIN_INTERVAL = 3000;   // 两次 OCR 最小间隔
+const DEFAULT_SETTINGS = { aiEnabled: false, aiBaseUrl: '', aiApiKey: '', aiModel: '', ocrEnabled: true };
 
 // ---------- 状态 ----------
 
@@ -21,6 +26,12 @@ let scanTimer = null;
 let slowMode = false;      // 帧率自适应：慢速模式
 let slowStreak = 0;
 let fastStreak = 0;
+let focusWaiting = false;  // 对焦等待期（扫描循环不启动）
+let focusWaitTimer = null;
+let noResultStreak = 0;    // 连续无合格结果帧数
+let lastOcrAt = 0;         // 上次 OCR 触发时间戳
+let ocrBusy = false;       // OCR 运行中（暂停扫描循环）
+let ocrWorkerPromise = null;
 
 // 离屏 canvas（ROI 裁剪用）
 const roiCanvas = document.createElement('canvas');
@@ -43,6 +54,7 @@ const cameraPlaceholder = $('camera-placeholder');
 const connStatus = $('conn-status');
 const engineBadge = $('engine-badge');
 const regionSelect = $('region-select');
+const settingsModal = $('settings-modal');
 const toast = $('toast');
 
 // ---------- 工具函数 ----------
@@ -134,14 +146,14 @@ function scoreCandidate(text, fmt, rules) {
   return { score, carrier };
 }
 
-// 多候选点选弹窗
-function askUserPick(cands) {
+// 多候选点选弹窗（title 可自定义）
+function askUserPick(cands, title = '识别到多个候选，请确认单号') {
   return new Promise(resolve => {
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;display:flex;align-items:center;justify-content:center;';
     const box = document.createElement('div');
     box.style.cssText = 'background:#fff;border-radius:12px;padding:16px;max-width:340px;width:90%;max-height:80vh;overflow-y:auto;';
-    box.innerHTML = '<div style="font-size:15px;font-weight:600;margin-bottom:10px">识别到多个候选，请确认单号</div>';
+    box.innerHTML = `<div style="font-size:15px;font-weight:600;margin-bottom:10px">${escapeHTML(title)}</div>`;
     cands.forEach(c => {
       const btn = document.createElement('button');
       btn.style.cssText = 'display:block;width:100%;padding:10px 12px;margin:6px 0;border:1px solid #e0e0e0;border-radius:8px;background:#fafafa;font-size:13px;text-align:left;cursor:pointer;';
@@ -212,6 +224,19 @@ function updateFrameStats(ms) {
     if (ms > 150) { slowStreak++; fastStreak = 0; if (slowStreak >= 3) slowMode = true; }
     else slowStreak = 0;
   }
+}
+
+// ---------- 设置存储 ----------
+
+function getSettings() {
+  try { return { ...DEFAULT_SETTINGS, ...(JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')) }; }
+  catch (e) { return { ...DEFAULT_SETTINGS }; }
+}
+function saveSettings(s) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
+
+function aiReady() {
+  const s = getSettings();
+  return s.aiEnabled && s.aiBaseUrl && s.aiApiKey && s.aiModel;
 }
 
 // 蜂鸣音效
@@ -300,7 +325,7 @@ function render() {
     if (r.trackingNo) dupCount[r.trackingNo] = (dupCount[r.trackingNo] || 0) + 1;
   });
 
-  tbody.innerHTML = results.map(r => {
+  tbody.innerHTML = results.map((r, i) => {
     const isDup = r.trackingNo && dupCount[r.trackingNo] > 1;
     const rowCls = r.invalidTrackingNo && !r.trackingNo ? 'row-invalid' : '';
     // 物流单号三态
@@ -320,6 +345,7 @@ function render() {
     const timeStr = `${String(time.getHours()).padStart(2,'0')}:${String(time.getMinutes()).padStart(2,'0')}`;
     return `<tr class="${rowCls}" data-id="${r.id}">
       <td><input type="checkbox" class="row-check" data-id="${r.id}"></td>
+      <td style="color:var(--muted);font-size:12px">${results.length - i}</td>
       <td style="white-space:nowrap;font-size:12px">${escapeHTML(r.date.slice(5))}<br><span style="color:var(--muted)">${timeStr}</span></td>
       <td>${trackingCell}${dupTag}</td>
       <td><input class="note-input" data-id="${r.id}" value="${escapeHTML(r.note)}" placeholder="备注"></td>
@@ -338,7 +364,6 @@ function render() {
 class NativeBarcodeDetectorEngine {
   constructor() { this.detector = null; this.formats = null; }
   get name() { return 'native'; }
-  get useFullFrame() { return true; } // 原生快，直接检测全帧 video，省 canvas 拷贝
 
   async init() {
     const wanted = ['code_128', 'code_39', 'itf', 'qr_code', 'ean_13', 'ean_8', 'codabar'];
@@ -364,7 +389,6 @@ class NativeBarcodeDetectorEngine {
 class ZxingWasmEngine {
   constructor() { this.mod = null; this.formats = null; this.frameCount = 0; }
   get name() { return 'wasm'; }
-  get useFullFrame() { return false; } // 需要 ROI canvas 裁剪
 
   async init() {
     // 用原生 ESM 入口（含 readBarcodesFromImageData 复数版），reader 包比 full 小 ~300KB
@@ -473,7 +497,7 @@ function captureROI() {
 // ---------- 扫描循环 ----------
 
 function scheduleScan() {
-  if (!scanning) return;
+  if (!scanning || focusWaiting || ocrBusy) return;
   if (slowMode) {
     // 帧率自适应：解码慢时降低频率
     scanTimer = setTimeout(scanTick, 250);
@@ -485,16 +509,28 @@ function scheduleScan() {
 }
 
 async function scanTick() {
-  if (!scanning) return;
+  if (!scanning || focusWaiting || ocrBusy) return;
   scanRafId = null;
   scanTimer = null;
   const t0 = performance.now();
   try {
-    // 原生引擎直接检测全帧 video（快），wasm 用 ROI canvas
-    const source = engine.useFullFrame ? video : captureROI();
+    // 两引擎统一：只解码扫描框区域（含 10% margin）
+    const source = captureROI();
+    let hadQualified = false;
     if (source) {
       const cands = await engine.decode(source);
-      if (cands && cands.length) handleScanResult(cands);
+      if (cands && cands.length) hadQualified = await handleScanResult(cands);
+    }
+    // 连续无合格结果计数
+    noResultStreak = hadQualified ? 0 : noResultStreak + 1;
+
+    // 节流触发 OCR 兜底（条码/二维码识别失败时识别面单数字）
+    const now = Date.now();
+    if (noResultStreak >= OCR_TRIGGER_FRAMES && now - lastOcrAt >= OCR_MIN_INTERVAL) {
+      noResultStreak = 0;
+      lastOcrAt = now;
+      runOCRFallback();   // 同步置 ocrBusy=true，不 await；OCR 完成后恢复循环
+      return;
     }
   } catch (e) {
     // 单帧失败不中断循环
@@ -558,8 +594,16 @@ async function startScan() {
     btnStart.disabled = true;
     scanning = true;
 
-    // 6) 启动扫描循环 + 外设
-    scheduleScan();
+    // 6) 对焦等待：3 秒后再启动扫描循环（等手动对焦，所有模式生效）
+    showToast('摄像头已开启，请将面单对准扫描框，可轻触画面辅助对焦', FOCUS_WAIT_MS);
+    focusWaiting = true;
+    focusWaitTimer = setTimeout(() => {
+      focusWaiting = false;
+      focusWaitTimer = null;
+      if (scanning) scheduleScan();
+    }, FOCUS_WAIT_MS);
+
+    // 7) 外设
     await detectTorch();
     await requestWakeLock();
 
@@ -587,6 +631,10 @@ function stopScan() {
   slowMode = false;
   slowStreak = 0;
   fastStreak = 0;
+  noResultStreak = 0;
+  if (focusWaitTimer) { clearTimeout(focusWaitTimer); focusWaitTimer = null; }
+  focusWaiting = false;
+  terminateOcrWorker();
 
   try { if (engine) engine.destroy(); } catch (e) {}
   engine = null;
@@ -621,6 +669,7 @@ function addScanItem(text, fmt, accepted) {
   stopScan();
 }
 
+// 处理解码候选，返回是否出现合格候选（供 OCR 节流统计）
 async function handleScanResult(cands) {
   const rules = getActiveRules();
 
@@ -641,26 +690,28 @@ async function handleScanResult(cands) {
     .filter(Boolean)
     .sort((a, b) => b.score - a.score);
 
-  if (scored.length === 0) {
-    // 无合格候选：保留第一个原始结果做 ⚠ 警告
-    const first = unique[0];
-    if (first) addScanItem(first.text, first.format, false);
-    return;
+  if (scored.length === 0) return false;   // 无合格候选：静默忽略，继续扫描
+
+  // 通用模式：一律手动确认（即使唯一候选）
+  if (regionSelect.value === 'generic') {
+    stopScan();
+    const picked = await askUserPick(scored, '识别到单号，请确认后录入');
+    if (picked) addScanItem(picked.text, picked.format, true);
+    return true;                            // 已出现合格候选（含用户取消）
   }
 
+  // PH 模式：唯一/分差≥60 自动，否则弹窗
   const top = scored[0];
   const second = scored[1];
-  // 唯一候选或与次高分差 ≥60 → 自动选中
   const autoPick = scored.length === 1 || !second || (top.score - second.score >= 60);
-
   if (autoPick) {
     addScanItem(top.text, top.format, true);
   } else {
-    // 多个高分候选竞争：先停止扫描，再弹窗让用户点选
     stopScan();
     const picked = await askUserPick(scored);
     if (picked) addScanItem(picked.text, picked.format, true);
   }
+  return true;
 }
 
 // ---------- 手电筒 ----------
@@ -708,6 +759,143 @@ function releaseWakeLock() {
   if (wakeLock) {
     try { wakeLock.release(); wakeLock = null; } catch (e) {}
   }
+}
+
+// ---------- OCR 兜底（Tesseract.js 本地 + AI 视觉 API） ----------
+
+// 懒加载 Tesseract worker 单例
+async function ensureOcrWorker() {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = (async () => {
+      const { createWorker } = await import('https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.esm.min.js');
+      return createWorker('eng', 1, {
+        workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/worker.min.js',
+        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@6.1.2',
+        langPath: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int',
+        logger: () => {}
+      });
+    })();
+  }
+  return ocrWorkerPromise;
+}
+
+async function ocrRecognize(canvas) {
+  const worker = await ensureOcrWorker();
+  const { data } = await worker.recognize(canvas, {
+    tessedit_pageseg_mode: '7',   // PSM 7 单行
+    tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  });
+  return extractTrackingFromText(data.text);
+}
+
+async function terminateOcrWorker() {
+  if (ocrWorkerPromise) {
+    const w = await ocrWorkerPromise.catch(() => null);
+    if (w) { try { await w.terminate(); } catch (e) {} }
+    ocrWorkerPromise = null;
+  }
+}
+
+// OCR 兜底入口：Tesseract 优先 → AI 兜底 → 确认弹窗 → 恢复扫描
+async function runOCRFallback() {
+  ocrBusy = true;   // 同步置位，暂停扫描循环
+  try {
+    const canvas = captureROI();   // 快照当前帧
+    if (!canvas) return;
+    let text = '';
+    if (getSettings().ocrEnabled) {
+      showToast('条码未识别，正在本地 OCR…', 0);
+      text = await ocrRecognize(canvas);
+    }
+    if (!text && aiReady()) {
+      showToast('OCR 无结果，正在 AI 识别…', 0);
+      text = await aiRecognize(canvas);
+    }
+    if (text && scanning) {
+      const rules = getActiveRules();
+      const r = scoreCandidate(text, 'OCR', rules);   // 经地区规则校验
+      if (r && r.score > 0) {
+        stopScan();
+        const picked = await askUserPick([{ text, format: 'OCR', ...r }], 'OCR 识别结果，请确认');
+        if (picked) addScanItem(picked.text, 'OCR', true);
+      } else if (text) {
+        showToast('OCR 结果不符合单号规则', 2000);
+      }
+    }
+  } catch (e) {
+    showToast('OCR 识别失败：' + (e.message || e), 3000);
+  } finally {
+    ocrBusy = false;
+    hideToast();
+    if (scanning) scheduleScan();   // 恢复扫描循环
+  }
+}
+
+// 图片压缩为 data URL
+function compressCanvas(canvas, maxSide = 1280, quality = 0.9) {
+  let src = canvas;
+  if (Math.max(canvas.width, canvas.height) > maxSide) {
+    const scale = maxSide / Math.max(canvas.width, canvas.height);
+    const c = document.createElement('canvas');
+    c.width = Math.round(canvas.width * scale);
+    c.height = Math.round(canvas.height * scale);
+    c.getContext('2d').drawImage(canvas, 0, 0, c.width, c.height);
+    src = c;
+  }
+  return src.toDataURL('image/jpeg', quality);
+}
+
+// 从 OCR/AI 文本提取单号（JSON 优先 + 正则兜底）
+function extractTrackingFromText(text) {
+  if (!text) return '';
+  const jm = String(text).match(/\{[\s\S]*\}/);
+  if (jm) {
+    try {
+      const p = JSON.parse(jm[0]);
+      const t = String(p.trackingNo || p.tracking_no || p.tracking || '').trim();
+      if (t) return t.toUpperCase();
+    } catch (e) {}
+  }
+  const m = String(text).match(/[A-Z]{0,3}\d{9,}/i) || String(text).match(/\b\d{8,16}\b/);
+  return m ? m[0].toUpperCase() : '';
+}
+
+// AI 视觉提示词：按当前地区规则生成
+function buildVisionPrompt() {
+  const ph = regionSelect.value === 'PH';
+  return ph
+    ? '这是菲律宾物流面单（shipping label）图片。请识别条码/二维码附近的人类可读单号。物流单号特征：0-3 个字母开头（如 JT、JD、LP）后接 9 位以上纯数字，总长 ≥12，无连字符/空格/标点。输出严格 JSON：{"trackingNo":"...","orderNo":"...","name":"...","phone":"..."}，没有的填空字符串，不要输出 JSON 以外的内容。'
+    : '这是物流面单图片。请识别条码/二维码附近印刷的单号。单号特征：可选 0-3 个字母开头 + 至少 9 位数字（总长 ≥12），也可能是 8-16 位纯数字。输出严格 JSON：{"trackingNo":"...","orderNo":"...","name":"..."}，没有的填空字符串，不要输出 JSON 以外的内容。';
+}
+
+async function aiRecognize(canvas) {
+  const s = getSettings();
+  const body = {
+    model: s.aiModel,
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: buildVisionPrompt() },
+      { type: 'image_url', image_url: { url: compressCanvas(canvas) } }
+    ]}],
+    max_tokens: 500,
+    temperature: 0.1
+  };
+  const base = s.aiBaseUrl.replace(/\/+$/, '');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30000);
+  try {
+    const resp = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${s.aiApiKey}` },
+      body: JSON.stringify(body),
+      signal: ctrl.signal
+    });
+    if (!resp.ok) throw new Error(`AI API ${resp.status}: ${(await resp.text().catch(() => '')).slice(0, 200)}`);
+    const json = await resp.json();
+    return extractTrackingFromText(json.choices?.[0]?.message?.content || '');
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('AI 请求超时(30s)');
+    throw e;
+  } finally { clearTimeout(timer); }
 }
 
 // ---------- 复制 / 导出 / 清空 ----------
@@ -801,6 +989,72 @@ function updateNote(id, value) {
   r.note = value;
   saveResults();
 }
+
+// ---------- 设置模态 ----------
+
+function openSettings() {
+  const s = getSettings();
+  $('set-ocr').checked = s.ocrEnabled;
+  $('set-ai').checked = s.aiEnabled;
+  $('set-base').value = s.aiBaseUrl;
+  $('set-key').value = s.aiApiKey;
+  $('set-model').value = s.aiModel;
+  settingsModal.classList.remove('hidden');
+}
+function closeSettings() {
+  settingsModal.classList.add('hidden');
+}
+
+$('btn-settings').addEventListener('click', openSettings);
+$('btn-settings-cancel').addEventListener('click', closeSettings);
+$('btn-settings-save').addEventListener('click', () => {
+  const s = {
+    ocrEnabled: $('set-ocr').checked,
+    aiEnabled: $('set-ai').checked,
+    aiBaseUrl: $('set-base').value.trim(),
+    aiApiKey: $('set-key').value.trim(),
+    aiModel: $('set-model').value.trim()
+  };
+  if (s.aiEnabled && (!s.aiBaseUrl || !s.aiApiKey || !s.aiModel)) {
+    showToast('启用 AI 兜底需填全 Base URL / Key / 模型', 2500);
+    return;
+  }
+  saveSettings(s);
+  closeSettings();
+  showToast('设置已保存', 1500);
+});
+$('btn-settings-test').addEventListener('click', async () => {
+  const base = $('set-base').value.trim().replace(/\/+$/, '');
+  const key = $('set-key').value.trim();
+  const model = $('set-model').value.trim();
+  if (!base || !key || !model) { showToast('请先填写 Base URL / Key / 模型', 2000); return; }
+  const btn = $('btn-settings-test');
+  btn.disabled = true;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    const resp = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+      body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 5 }),
+      signal: ctrl.signal
+    });
+    clearTimeout(timer);
+    showToast(resp.ok ? '连接成功 ✓' : `连接失败 (${resp.status})`, 2500);
+  } catch (e) {
+    showToast('连接失败：' + (e.message || e), 2500);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// 点击视频画面"唤醒"自动对焦（低风险增强，不支持设备自动忽略）
+video.addEventListener('click', () => {
+  if (!torchTrack) return;
+  try {
+    torchTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+  } catch (e) {}
+});
 
 // ---------- 事件绑定 ----------
 
