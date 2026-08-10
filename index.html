@@ -18,6 +18,7 @@
     --warn: #ff9800;
     --err: #f44336;
     --shadow: 0 1px 3px rgba(0,0,0,0.12);
+    --header-h: 34px;   /* 紧凑 header 高度，sticky 联动 */
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -28,21 +29,29 @@
     margin: 0 auto;
     padding-bottom: env(safe-area-inset-bottom, 0);
   }
-  /* 标题栏 */
+  /* 标题栏（紧凑） */
   header {
     background: var(--card);
-    padding: 12px 16px;
+    padding: 8px 12px;
+    height: var(--header-h);
     box-shadow: var(--shadow);
     position: sticky; top: 0; z-index: 100;
     display: flex; align-items: center; gap: 8px;
   }
-  header h1 { font-size: 18px; font-weight: 600; flex: 1; }
-  /* 摄像头区域：扫描时固定在视口上部（sticky），缩小高度保留 20% 上下冗余 */
+  header h1 { font-size: 15px; font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* 常驻区：扫描窗口 + 第一行按钮（扫描/地区/闪光灯）始终前台 */
+  .scan-sticky {
+    position: sticky;
+    top: var(--header-h);
+    z-index: 50;
+    background: var(--bg);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  /* 摄像头区域 */
   .camera-section {
-    position: sticky; top: 48px; z-index: 50;
     background: #000;
     aspect-ratio: 4/3;
-    max-height: 230px;
+    max-height: 160px;
     overflow: hidden;
   }
   #video {
@@ -95,8 +104,8 @@
     flex-wrap: wrap;
   }
   .controls button {
-    flex: 1; min-width: 80px;
-    padding: 10px 12px;
+    flex: 1; min-width: 56px;
+    padding: 9px 8px;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--card);
@@ -120,16 +129,6 @@
     width: 40px; height: 40px;
     font-size: 18px; cursor: pointer; z-index: 10;
   }
-  /* 统计 */
-  .stats {
-    display: flex; gap: 0; padding: 8px 16px;
-    background: var(--card); margin-top: 1px;
-    font-size: 13px; color: var(--muted);
-  }
-  .stats div { flex: 1; text-align: center; }
-  .stats .num { font-size: 18px; font-weight: 700; color: var(--text); }
-  .stats .num.ok { color: var(--ok); }
-  .stats .num.warn { color: var(--warn); }
   /* 结果表 */
   .results-section {
     background: var(--card); margin-top: 8px;
@@ -189,7 +188,7 @@
   .hidden { display: none !important; }
   .row-check { width: 18px; height: 18px; cursor: pointer; }
   #region-select {
-    flex: 1; min-width: 120px;
+    flex: 1; min-width: 90px;
     padding: 10px 8px;
     border: 1px solid var(--border); border-radius: 8px;
     background: var(--card); font-size: 14px;
@@ -232,45 +231,43 @@
   <span style="font-size:12px;color:var(--muted)" id="conn-status"></span>
 </header>
 
-<!-- 摄像头区域 -->
-<div class="camera-section" id="camera-section">
-  <video id="video" playsinline muted></video>
-  <button class="torch-btn hidden" id="btn-torch" title="手电筒">🔦</button>
-  <div class="scan-overlay" id="scan-overlay" style="display:none">
-    <div class="scan-frame" id="scan-frame">
-      <div class="scan-line"></div>
+<!-- 常驻区：扫描窗口 + 第一行按钮始终前台 -->
+<div class="scan-sticky">
+  <!-- 摄像头区域 -->
+  <div class="camera-section" id="camera-section">
+    <video id="video" playsinline muted></video>
+    <button class="torch-btn hidden" id="btn-torch" title="手电筒">🔦</button>
+    <div class="scan-overlay" id="scan-overlay" style="display:none">
+      <div class="scan-frame" id="scan-frame">
+        <div class="scan-line"></div>
+      </div>
+    </div>
+    <div class="scan-flash" id="scan-flash"></div>
+    <div class="camera-placeholder" id="camera-placeholder">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/></svg>
+      <p>点击「扫描」打开摄像头</p>
+      <p style="font-size:12px;color:#999">将摄像头对准面单条码/二维码</p>
     </div>
   </div>
-  <div class="scan-flash" id="scan-flash"></div>
-  <div class="camera-placeholder" id="camera-placeholder">
-    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/></svg>
-    <p>点击「扫描」打开摄像头</p>
-    <p style="font-size:12px;color:#999">将摄像头对准面单条码/二维码</p>
+
+  <!-- 第一行：扫描 / 地区 / 闪光灯 -->
+  <div class="controls">
+    <button class="primary" id="btn-start">▶ 扫描</button>
+    <select id="region-select" title="地区规则">
+      <option value="generic">通用</option>
+      <option value="PH" selected>菲律宾</option>
+    </select>
+    <button id="btn-torch-toggle" disabled>🔦 闪光灯</button>
   </div>
 </div>
 
-<!-- 控制按钮 -->
+<!-- 第二行：复制 / 导出 / 新建 / 删除 / 设置 -->
 <div class="controls">
-  <button class="primary" id="btn-start">▶ 扫描</button>
-  <button id="btn-torch-toggle" disabled>🔦 闪光灯</button>
-</div>
-<div class="controls">
-  <button id="btn-copy">📋 复制单号</button>
-  <button id="btn-export">📊 导出CSV</button>
-  <button id="btn-add-manual">✏ 新建</button>
-  <button class="danger" id="btn-clear">🗑 删除</button>
-  <select id="region-select" title="地区规则">
-    <option value="generic">通用</option>
-    <option value="PH" selected>菲律宾</option>
-  </select>
-  <button id="btn-settings">⚙ 设置</button>
-</div>
-
-<!-- 统计 -->
-<div class="stats">
-  <div><div class="num" id="stat-total">0</div>总计</div>
-  <div><div class="num ok" id="stat-ok">0</div>成功</div>
-  <div><div class="num warn" id="stat-warn">0</div>待校验</div>
+  <button id="btn-copy">复制</button>
+  <button id="btn-export">导出</button>
+  <button id="btn-add-manual">新建</button>
+  <button class="danger" id="btn-clear">删除</button>
+  <button id="btn-settings">设置</button>
 </div>
 
 <!-- 结果表 -->
@@ -310,6 +307,6 @@
   </div>
 </div>
 
-<script src="app.js?v=7"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>
