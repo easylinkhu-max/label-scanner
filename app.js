@@ -42,6 +42,7 @@ const scanFlash = $('scan-flash');
 const cameraPlaceholder = $('camera-placeholder');
 const connStatus = $('conn-status');
 const engineBadge = $('engine-badge');
+const regionSelect = $('region-select');
 const toast = $('toast');
 
 // ---------- 工具函数 ----------
@@ -82,6 +83,82 @@ function formatLabel(fmt) {
     'EAN-8': 'EAN8'
   };
   return map[String(fmt)] || String(fmt);
+}
+
+// ---------- 地区规则 ----------
+
+// 通用规则：宽泛单号格式（无地区指定时用）
+const GENERIC_CARRIERS = [
+  { name: '字母数字', re: /^[A-Z]{0,3}\d{9,}$/, score: 60 },
+  { name: '纯数字',   re: /^\d{8,16}$/,          score: 50 }
+];
+
+// 各地区承运商规则 —— 新增地区只需在此追加 + 下拉框加一项
+const REGION_RULES = {
+  PH: {
+    name: '菲律宾',
+    carriers: [
+      { name: 'J&T',     re: /^JT\d{10,16}$/i,  score: 100 },
+      { name: 'JD',      re: /^JD\d{10,16}$/i,  score: 95 },
+      { name: 'LP',      re: /^LP\d{10,16}$/i,  score: 95 },
+      { name: '纯数字',   re: /^\d{8,16}$/,      score: 70 },
+      { name: '字母数字', re: /^[A-Z]{0,3}\d{9,}$/i, score: 60 }
+    ]
+  }
+};
+
+// 当前生效的规则（对应下拉框选择），返回 null 表示不启用规则
+function getActiveRules() {
+  const v = regionSelect.value;
+  if (v === 'PH') return REGION_RULES.PH;
+  if (v === 'generic') return { name: '通用', carriers: GENERIC_CARRIERS };
+  return null;
+}
+
+// 候选打分：二维码优先 + 承运商格式匹配，返回 {score, carrier} 或 null
+function scoreCandidate(text, fmt, rules) {
+  const upper = String(text).trim().toUpperCase();
+  if (!upper) return null;
+  // PH 面单单号编码在二维码中，二维码优先；条形码低权重（重复/旧值靠规则排除）
+  const isQR = /QR/.test(fmt);
+  let score = isQR ? 100 : 30;
+  let carrier = '';
+  if (rules) {
+    for (const c of rules.carriers) {
+      if (c.re.test(upper)) { carrier = c.name; score += c.score; break; }
+    }
+    if (!carrier) score -= 200;   // 不匹配任何承运商格式 → 无关码（如公众号二维码）
+  } else if (/^[A-Z]{0,3}\d{9,}$/.test(upper)) {
+    score += 30;
+  }
+  return { score, carrier };
+}
+
+// 多候选点选弹窗
+function askUserPick(cands) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;display:flex;align-items:center;justify-content:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#fff;border-radius:12px;padding:16px;max-width:340px;width:90%;max-height:80vh;overflow-y:auto;';
+    box.innerHTML = '<div style="font-size:15px;font-weight:600;margin-bottom:10px">识别到多个候选，请确认单号</div>';
+    cands.forEach(c => {
+      const btn = document.createElement('button');
+      btn.style.cssText = 'display:block;width:100%;padding:10px 12px;margin:6px 0;border:1px solid #e0e0e0;border-radius:8px;background:#fafafa;font-size:13px;text-align:left;cursor:pointer;';
+      const tag = /QR/.test(c.format) ? '二维码' : '条形码';
+      btn.innerHTML = `<div style="font-family:Consolas,monospace;font-weight:600;word-break:break-all">${escapeHTML(c.text)}</div>` +
+        `<div style="color:#888;font-size:11px;margin-top:3px">${escapeHTML(formatLabel(c.format))} · ${tag}${c.carrier ? ' · ' + c.carrier : ''}</div>`;
+      btn.addEventListener('click', () => { overlay.remove(); resolve(c); });
+      box.appendChild(btn);
+    });
+    const cancel = document.createElement('button');
+    cancel.textContent = '取消';
+    cancel.style.cssText = 'display:block;width:100%;padding:9px;margin-top:8px;border:none;border-radius:8px;background:#f0f0f0;font-size:13px;cursor:pointer;';
+    cancel.addEventListener('click', () => { overlay.remove(); resolve(null); });
+    box.appendChild(cancel);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+  });
 }
 
 function showToast(msg, ms) {
@@ -171,10 +248,10 @@ function saveResults() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(results));
 }
 
-function addResult(text, fmt) {
+function addResult(text, fmt, forceValid) {
   const trimmed = String(text).trim();
   const upper = trimmed.toUpperCase();
-  const valid = isValidTrackingNo(upper);
+  const valid = forceValid ? true : isValidTrackingNo(upper);
 
   const item = {
     id: Date.now() + '_' + Math.random().toString(36).slice(2, 6),
@@ -273,10 +350,11 @@ class NativeBarcodeDetectorEngine {
 
   async decode(source) {
     const results = await this.detector.detect(source);
-    if (results && results.length > 0) {
-      return { text: results[0].rawValue, format: String(results[0].format).toUpperCase() };
-    }
-    return null;
+    // 返回全部候选（不再只取第一个）
+    return (results || []).map(r => ({
+      text: r.rawValue,
+      format: String(r.format).toUpperCase()
+    }));
   }
 
   destroy() { this.detector = null; }
@@ -289,7 +367,8 @@ class ZxingWasmEngine {
   get useFullFrame() { return false; } // 需要 ROI canvas 裁剪
 
   async init() {
-    this.mod = await import('https://cdn.jsdelivr.net/npm/@sec-ant/zxing-wasm@2.2.0/+esm');
+    // 用原生 ESM 入口（含 readBarcodesFromImageData 复数版），reader 包比 full 小 ~300KB
+    this.mod = await import('https://cdn.jsdelivr.net/npm/@sec-ant/zxing-wasm@2.2.0/dist/reader/index.js');
     // zxing-wasm 使用 PascalCase 格式名
     this.formats = ['Code128', 'QRCode', 'Code39', 'ITF', 'Codabar', 'EAN-13', 'EAN-8'];
     // 降采样用离屏 canvas
@@ -314,16 +393,16 @@ class ZxingWasmEngine {
     // 每 5 帧启用一次 TRY_HARDER 兜底，其余帧快速扫描
     this.frameCount++;
     const tryHarder = (this.frameCount % 5 === 0);
-    const result = await this.mod.readBarcodeFromImageData(imageData, {
+    const results = await this.mod.readBarcodesFromImageData(imageData, {
       tryHarder,
       formats: this.formats,
-      maxSymbols: 1
+      maxSymbols: 5
     });
-    if (result && result.text) {
-      // 输出格式名也是 PascalCase，统一转大写供 formatLabel 使用
-      return { text: result.text, format: String(result.format).toUpperCase() };
-    }
-    return null;
+    // 输出格式名是 PascalCase，统一转大写供 formatLabel 使用
+    return (results || []).map(r => ({
+      text: r.text,
+      format: String(r.format).toUpperCase()
+    }));
   }
 
   destroy() { this.mod = null; }
@@ -414,8 +493,8 @@ async function scanTick() {
     // 原生引擎直接检测全帧 video（快），wasm 用 ROI canvas
     const source = engine.useFullFrame ? video : captureROI();
     if (source) {
-      const r = await engine.decode(source);
-      if (r && r.text) handleScanResult(r.text, r.format);
+      const cands = await engine.decode(source);
+      if (cands && cands.length) handleScanResult(cands);
     }
   } catch (e) {
     // 单帧失败不中断循环
@@ -529,21 +608,59 @@ function stopScan() {
   setEngineBadge('');
 }
 
-function handleScanResult(text, fmt) {
-  // 添加结果
-  const item = addResult(text, fmt);
-
-  // 反馈：蜂鸣 + 震动 + 闪烁
-  const valid = isValidTrackingNo(text);
+// 添加扫描结果并反馈（accepted=true 表示规则已确认是有效单号）
+function addScanItem(text, fmt, accepted) {
+  const item = addResult(text, fmt, accepted);
+  const valid = accepted || isValidTrackingNo(text);
   beep(valid ? 1000 : 600, valid ? 0.1 : 0.2);
   vibrate(valid ? 100 : 200);
   scanFlash.classList.add('active');
   setTimeout(() => scanFlash.classList.remove('active'), 300);
-
   showToast(valid ? `✓ ${item.trackingNo}` : `⚠ ${item.invalidTrackingNo}`, 2000);
-
   // 扫描成功获得值后自动停止，避免重复扫描
   stopScan();
+}
+
+async function handleScanResult(cands) {
+  const rules = getActiveRules();
+
+  // 去重（相同内容只保留一个；若同时有二维码和条形码版，保留二维码版）
+  const seen = new Map();
+  for (const c of cands) {
+    const k = String(c.text).trim().toUpperCase();
+    if (!k) continue;
+    const isQR = /QR/.test(c.format);
+    const old = seen.get(k);
+    if (!old || (isQR && !/QR/.test(old.format))) seen.set(k, c);
+  }
+  const unique = [...seen.values()];
+
+  // 打分并筛选合格候选
+  const scored = unique
+    .map(c => { const r = scoreCandidate(c.text, c.format, rules); return r ? { ...c, ...r } : null; })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+
+  if (scored.length === 0) {
+    // 无合格候选：保留第一个原始结果做 ⚠ 警告
+    const first = unique[0];
+    if (first) addScanItem(first.text, first.format, false);
+    return;
+  }
+
+  const top = scored[0];
+  const second = scored[1];
+  // 唯一候选或与次高分差 ≥60 → 自动选中
+  const autoPick = scored.length === 1 || !second || (top.score - second.score >= 60);
+
+  if (autoPick) {
+    addScanItem(top.text, top.format, true);
+  } else {
+    // 多个高分候选竞争：先停止扫描，再弹窗让用户点选
+    stopScan();
+    const picked = await askUserPick(scored);
+    if (picked) addScanItem(picked.text, picked.format, true);
+  }
 }
 
 // ---------- 手电筒 ----------
