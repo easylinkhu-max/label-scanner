@@ -303,14 +303,6 @@ function render() {
   const tbody = $('result-body');
   const empty = $('empty-hint');
 
-  // 统计
-  const total = results.length;
-  const ok = results.filter(r => r.trackingNo).length;
-  const warn = results.filter(r => !r.trackingNo && r.invalidTrackingNo).length;
-  $('stat-total').textContent = total;
-  $('stat-ok').textContent = ok;
-  $('stat-warn').textContent = warn;
-
   if (results.length === 0) {
     empty.style.display = 'block';
     tbody.innerHTML = '';
