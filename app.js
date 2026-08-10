@@ -8,20 +8,16 @@
 // ---------- 常量 ----------
 
 const STORAGE_KEY = 'labelScannerResults';
-const COOLDOWN_MS = 3000; // 同一条码内容冷却时间
 
 // ---------- 状态 ----------
 
 let engine = null;
 let scanning = false;
-let lastScanText = '';
-let lastScanTime = 0;
 let wakeLock = null;
 let torchOn = false;
 let torchTrack = null;
 let scanRafId = null;
 let scanTimer = null;
-let pauseUntil = 0;        // 扫描成功后暂停截止时间
 let slowMode = false;      // 帧率自适应：慢速模式
 let slowStreak = 0;
 let fastStreak = 0;
@@ -37,9 +33,9 @@ const results = loadResults();
 const $ = id => document.getElementById(id);
 const video = $('video');
 const btnStart = $('btn-start');
-const btnStop = $('btn-stop');
 const btnTorch = $('btn-torch-toggle');
 const btnTorchIcon = $('btn-torch');
+const checkAll = $('check-all');
 const scanOverlay = $('scan-overlay');
 const scanFrameEl = $('scan-frame');
 const scanFlash = $('scan-flash');
@@ -216,6 +212,7 @@ function render() {
   if (results.length === 0) {
     empty.style.display = 'block';
     tbody.innerHTML = '';
+    checkAll.checked = false;
     return;
   }
   empty.style.display = 'none';
@@ -252,6 +249,10 @@ function render() {
       <td>${statusTag}</td>
     </tr>`;
   }).join('');
+
+  // 同步全选框状态
+  const checks = tbody.querySelectorAll('.row-check');
+  checkAll.checked = checks.length > 0 && [...checks].every(cb => cb.checked);
 }
 
 // ---------- 扫描引擎 ----------
@@ -394,11 +395,6 @@ function captureROI() {
 
 function scheduleScan() {
   if (!scanning) return;
-  // 扫描成功后的暂停窗口
-  if (Date.now() < pauseUntil) {
-    scanTimer = setTimeout(scheduleScan, pauseUntil - Date.now());
-    return;
-  }
   if (slowMode) {
     // 帧率自适应：解码慢时降低频率
     scanTimer = setTimeout(scanTick, 250);
@@ -481,7 +477,6 @@ async function startScan() {
     cameraPlaceholder.style.display = 'none';
     scanOverlay.style.display = 'flex';
     btnStart.disabled = true;
-    btnStop.disabled = false;
     scanning = true;
 
     // 6) 启动扫描循环 + 外设
@@ -501,7 +496,6 @@ async function startScan() {
     cameraPlaceholder.style.display = 'flex';
     scanOverlay.style.display = 'none';
     btnStart.disabled = false;
-    btnStop.disabled = true;
     scanning = false;
     setEngineBadge('');
   }
@@ -511,7 +505,6 @@ function stopScan() {
   if (!scanning) return;
   scanning = false;
   cancelScanLoop();
-  pauseUntil = 0;
   slowMode = false;
   slowStreak = 0;
   fastStreak = 0;
@@ -526,7 +519,6 @@ function stopScan() {
   scanOverlay.style.display = 'none';
   cameraPlaceholder.style.display = 'flex';
   btnStart.disabled = false;
-  btnStop.disabled = true;
   btnTorch.disabled = true;
   btnTorchIcon.style.display = 'none';
   connStatus.textContent = '已停止';
@@ -538,12 +530,6 @@ function stopScan() {
 }
 
 function handleScanResult(text, fmt) {
-  const now = Date.now();
-  // 冷却期内忽略相同内容
-  if (text === lastScanText && now - lastScanTime < COOLDOWN_MS) return;
-  lastScanText = text;
-  lastScanTime = now;
-
   // 添加结果
   const item = addResult(text, fmt);
 
@@ -554,10 +540,10 @@ function handleScanResult(text, fmt) {
   scanFlash.classList.add('active');
   setTimeout(() => scanFlash.classList.remove('active'), 300);
 
-  // 扫描成功后暂停 800ms，便于用户确认，避免连续误扫
-  pauseUntil = now + 800;
-
   showToast(valid ? `✓ ${item.trackingNo}` : `⚠ ${item.invalidTrackingNo}`, 2000);
+
+  // 扫描成功获得值后自动停止，避免重复扫描
+  stopScan();
 }
 
 // ---------- 手电筒 ----------
@@ -702,13 +688,18 @@ function updateNote(id, value) {
 // ---------- 事件绑定 ----------
 
 btnStart.addEventListener('click', startScan);
-btnStop.addEventListener('click', stopScan);
 btnTorch.addEventListener('click', toggleTorch);
 btnTorchIcon.addEventListener('click', toggleTorch);
 $('btn-copy').addEventListener('click', copyTrackingNos);
 $('btn-export').addEventListener('click', exportCSV);
 $('btn-clear').addEventListener('click', deleteSelected);
 $('btn-add-manual').addEventListener('click', addNewRow);
+
+// 全选/取消全选
+checkAll.addEventListener('change', e => {
+  const checked = e.target.checked;
+  document.querySelectorAll('.row-check').forEach(cb => cb.checked = checked);
+});
 
 // 结果表事件委托
 $('result-body').addEventListener('click', e => {
@@ -729,7 +720,11 @@ $('result-body').addEventListener('click', e => {
 
 $('result-body').addEventListener('change', e => {
   const el = e.target;
-  if (el.classList.contains('tracking-input')) {
+  if (el.classList.contains('row-check')) {
+    // 行勾选后同步全选框状态
+    const checks = document.querySelectorAll('.row-check');
+    checkAll.checked = checks.length > 0 && [...checks].every(cb => cb.checked);
+  } else if (el.classList.contains('tracking-input')) {
     updateTracking(el.dataset.id, el.value);
   } else if (el.classList.contains('note-input')) {
     updateNote(el.dataset.id, el.value);
