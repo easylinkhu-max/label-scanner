@@ -47,11 +47,15 @@
     background: var(--bg);
     box-shadow: 0 1px 3px rgba(0,0,0,0.06);
   }
-  /* 摄像头区域 */
+  /* 防 iOS sticky 容器内控件点击失效：提升到相机区之上 */
+  .scan-sticky .controls {
+    position: relative;
+    z-index: 1;
+  }
+  /* 摄像头区域：固定高度（aspect-ratio+max-height 会错误收缩宽度到 213px） */
   .camera-section {
     background: #000;
-    aspect-ratio: 4/3;
-    max-height: 160px;
+    height: 160px;
     overflow: hidden;
   }
   #video {
@@ -65,8 +69,8 @@
     pointer-events: none;
   }
   .scan-frame {
-    width: 70%; max-width: 280px;
-    aspect-ratio: 2/1;
+    width: 92%;
+    height: 65%;
     border: 2px solid rgba(255,255,255,0.6);
     border-radius: 8px;
     position: relative;
@@ -307,6 +311,6 @@
   </div>
 </div>
 
-<script src="app.js?v=8"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>
