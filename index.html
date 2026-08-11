@@ -18,7 +18,7 @@
     --warn: #ff9800;
     --err: #f44336;
     --shadow: 0 1px 3px rgba(0,0,0,0.12);
-    --header-h: 34px;   /* 紧凑 header 高度，sticky 联动 */
+    --header-h: 48px;   /* header 含地区下拉+设置按钮 */
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -29,16 +29,31 @@
     margin: 0 auto;
     padding-bottom: env(safe-area-inset-bottom, 0);
   }
-  /* 标题栏（紧凑） */
+  /* 标题栏（含地区下拉 + 设置按钮） */
   header {
     background: var(--card);
-    padding: 8px 12px;
+    padding: 6px 10px;
     height: var(--header-h);
     box-shadow: var(--shadow);
     position: sticky; top: 0; z-index: 100;
-    display: flex; align-items: center; gap: 8px;
+    display: flex; align-items: center; gap: 6px;
   }
   header h1 { font-size: 15px; font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header #region-select {
+    flex: 0 0 auto; min-width: 0; width: auto;
+    padding: 6px 22px 6px 8px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--card); font-size: 13px;
+    -webkit-appearance: none; appearance: none;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 8px center;
+  }
+  header #btn-settings {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--card); font-size: 13px; cursor: pointer;
+  }
   /* 常驻区：扫描窗口 + 第一行按钮（扫描/地区/闪光灯）始终前台 */
   .scan-sticky {
     position: sticky;
@@ -191,15 +206,6 @@
   .toast.hidden { opacity: 0; pointer-events: none; }
   .hidden { display: none !important; }
   .row-check { width: 18px; height: 18px; cursor: pointer; }
-  #region-select {
-    flex: 1; min-width: 90px;
-    padding: 10px 8px;
-    border: 1px solid var(--border); border-radius: 8px;
-    background: var(--card); font-size: 14px;
-    -webkit-appearance: none; appearance: none;
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
-    background-repeat: no-repeat; background-position: right 10px center;
-  }
   /* 设置模态 */
   .modal {
     position: fixed; inset: 0; z-index: 1000;
@@ -233,6 +239,11 @@
   <h1>📷 物流面单扫描</h1>
   <span style="font-size:11px;color:var(--muted)" id="engine-badge"></span>
   <span style="font-size:12px;color:var(--muted)" id="conn-status"></span>
+  <select id="region-select" title="地区规则">
+    <option value="generic">通用</option>
+    <option value="PH" selected>菲律宾</option>
+  </select>
+  <button id="btn-settings">设置</button>
 </header>
 
 <!-- 常驻区：扫描窗口 + 第一行按钮始终前台 -->
@@ -254,25 +265,24 @@
     </div>
   </div>
 
-  <!-- 第一行：扫描 / 地区 / 闪光灯 -->
+  <!-- 第一行：扫描 / 暂停 / OCR / 打光 -->
   <div class="controls">
     <button class="primary" id="btn-start">▶ 扫描</button>
-    <select id="region-select" title="地区规则">
-      <option value="generic">通用</option>
-      <option value="PH" selected>菲律宾</option>
-    </select>
-    <button id="btn-torch-toggle" disabled>🔦 闪光灯</button>
+    <button id="btn-pause" disabled title="暂停/继续扫描">暂停</button>
+    <button id="btn-ocr" disabled title="对当前画面手动 OCR 识别">OCR</button>
+    <button id="btn-torch-toggle" disabled title="打光">打光</button>
   </div>
 </div>
 
-<!-- 第二行：复制 / 导出 / 新建 / 删除 / 设置 -->
+<!-- 第二行：复制 / 导出 / 新建 / 删除 / 图片 -->
 <div class="controls">
   <button id="btn-copy">复制</button>
   <button id="btn-export">导出</button>
   <button id="btn-add-manual">新建</button>
   <button class="danger" id="btn-clear">删除</button>
-  <button id="btn-settings">设置</button>
+  <button id="btn-image" title="选择本地图片识别（也可直接 Ctrl+V 粘贴截图）">图片</button>
 </div>
+<input type="file" id="file-image" accept="image/*" style="display:none">
 
 <!-- 结果表 -->
 <div class="results-section">
@@ -311,6 +321,6 @@
   </div>
 </div>
 
-<script src="app.js?v=12"></script>
+<script src="app.js?v=14"></script>
 </body>
 </html>
