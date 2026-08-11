@@ -284,7 +284,7 @@
         <th>日期</th>
         <th>物流单号</th>
         <th>备注</th>
-        <th>状态</th>
+        <th>识别</th>
       </tr>
     </thead>
     <tbody id="result-body"></tbody>
@@ -300,9 +300,9 @@
     <h3>设置</h3>
     <div class="set-row"><label class="set-label">本地 OCR 兜底（Tesseract.js，按需加载）</label><input type="checkbox" id="set-ocr" checked></div>
     <div class="set-row"><label class="set-label">AI 视觉兜底（图片将上传到配置的服务）</label><input type="checkbox" id="set-ai"></div>
-    <div class="set-field"><label>API Base URL</label><input type="text" id="set-base" placeholder="https://…/v1"></div>
+    <div class="set-field"><label>API Base URL</label><input type="text" id="set-base" placeholder="https://opencode.ai/zen/go/v1"></div>
     <div class="set-field"><label>API Key</label><input type="password" id="set-key" placeholder="sk-…"></div>
-    <div class="set-field"><label>模型名称</label><input type="text" id="set-model" placeholder="gpt-4o-mini"></div>
+    <div class="set-field"><label>模型名称</label><input type="text" id="set-model" placeholder="mimo-v2.5"></div>
     <div class="modal-actions">
       <button id="btn-settings-save">保存</button>
       <button id="btn-settings-test">测试连接</button>
@@ -311,6 +311,6 @@
   </div>
 </div>
 
-<script src="app.js?v=9"></script>
+<script src="app.js?v=12"></script>
 </body>
 </html>
