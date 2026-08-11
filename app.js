@@ -9,10 +9,10 @@
 
 const STORAGE_KEY = 'labelScannerResults';
 const SETTINGS_KEY = 'labelScannerSettings';
-const FOCUS_WAIT_MS = 3000;      // 扫描前手动对焦等待
+const FOCUS_WAIT_MS = 2000;      // 扫描前手动对焦等待
 const OCR_TRIGGER_FRAMES = 12;   // 连续无结果帧数触发 OCR（约 0.4-0.8s）
 const OCR_MIN_INTERVAL = 3000;   // 两次 OCR 最小间隔
-const DEFAULT_SETTINGS = { aiEnabled: false, aiBaseUrl: '', aiApiKey: '', aiModel: '', ocrEnabled: true };
+const DEFAULT_SETTINGS = { aiEnabled: false, aiBaseUrl: 'https://opencode.ai/zen/go/v1', aiApiKey: '', aiModel: 'mimo-v2.5', ocrEnabled: true };
 
 // ---------- 状态 ----------
 
@@ -95,6 +95,16 @@ function formatLabel(fmt) {
     'EAN-8': 'EAN8'
   };
   return map[String(fmt)] || String(fmt);
+}
+
+// 识别方式：从条码格式推导（条形/二维/OCR/AI）
+function recognitionMethod(fmt) {
+  const f = String(fmt || '').toUpperCase();
+  if (f === 'OCR') return 'OCR';
+  if (f === 'AI') return 'AI';
+  if (f === 'MANUAL') return '—';
+  if (f.includes('QR')) return '二维';
+  return '条形';
 }
 
 // ---------- 地区规则 ----------
@@ -229,8 +239,13 @@ function updateFrameStats(ms) {
 // ---------- 设置存储 ----------
 
 function getSettings() {
-  try { return { ...DEFAULT_SETTINGS, ...(JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')) }; }
-  catch (e) { return { ...DEFAULT_SETTINGS }; }
+  try {
+    const s = { ...DEFAULT_SETTINGS, ...(JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')) };
+    // 旧数据兜底：空值补默认（AI 地址/模型预填）
+    if (!s.aiBaseUrl) s.aiBaseUrl = DEFAULT_SETTINGS.aiBaseUrl;
+    if (!s.aiModel) s.aiModel = DEFAULT_SETTINGS.aiModel;
+    return s;
+  } catch (e) { return { ...DEFAULT_SETTINGS }; }
 }
 function saveSettings(s) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
 
@@ -330,9 +345,7 @@ function render() {
       trackingCell = `<input class="tracking-input" data-id="${r.id}" placeholder="输入单号">`;
     }
     const dupTag = isDup ? ` <span class="tag tag-dup">×${dupCount[r.trackingNo]}</span>` : '';
-    const statusTag = r.trackingNo
-      ? '<span style="color:var(--ok);font-size:12px">✓</span>'
-      : (r.invalidTrackingNo ? '<span class="tag tag-warn">⚠</span>' : '<span style="color:var(--muted);font-size:12px">—</span>');
+    const methodTag = escapeHTML(recognitionMethod(r.format));
     const time = new Date(r.timestamp);
     const timeStr = `${String(time.getHours()).padStart(2,'0')}:${String(time.getMinutes()).padStart(2,'0')}`;
     return `<tr class="${rowCls}" data-id="${r.id}">
@@ -341,7 +354,7 @@ function render() {
       <td style="white-space:nowrap;font-size:12px">${escapeHTML(r.date.slice(5))}<br><span style="color:var(--muted)">${timeStr}</span></td>
       <td>${trackingCell}${dupTag}</td>
       <td><input class="note-input" data-id="${r.id}" value="${escapeHTML(r.note)}" placeholder="备注"></td>
-      <td>${statusTag}</td>
+      <td style="white-space:nowrap;font-size:12px">${methodTag}</td>
     </tr>`;
   }).join('');
 
@@ -441,31 +454,38 @@ async function createEngine() {
 
 // ---------- ROI 裁剪 ----------
 
+// ROI 布局缓存：video/frame 相对偏移在 sticky 滚动中不变，仅分辨率/尺寸变化时重算
+let roiLayout = null;
+
 function getROI() {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
 
-  // object-fit: cover 缩放换算
   const dispW = video.clientWidth, dispH = video.clientHeight;
-  const scale = Math.max(dispW / vw, dispH / vh);
-  const coveredW = vw * scale, coveredH = vh * scale;
-  const offsetX = (dispW - coveredW) / 2;
-  const offsetY = (dispH - coveredH) / 2;
+  if (!roiLayout || roiLayout.vw !== vw || roiLayout.vh !== vh ||
+      roiLayout.dispW !== dispW || roiLayout.dispH !== dispH) {
+    // 布局相关量只在首帧/分辨率/尺寸变化时计算（含 getBoundingClientRect）
+    const scale = Math.max(dispW / vw, dispH / vh);
+    const vr = video.getBoundingClientRect();
+    const fr = scanFrameEl.getBoundingClientRect();
+    roiLayout = {
+      vw, vh, dispW, dispH, scale,
+      offX: (dispW - vw * scale) / 2,
+      offY: (dispH - vh * scale) / 2,
+      relX: fr.left - vr.left,   // frame 相对 video 偏移（滚动不变）
+      relY: fr.top - vr.top,
+      frameW: fr.width,
+      frameH: fr.height
+    };
+  }
+  const L = roiLayout;
 
-  // 扫描框相对视频显示框的坐标
-  const vr = video.getBoundingClientRect();
-  const fr = scanFrameEl.getBoundingClientRect();
-  let sx = (fr.left - vr.left - offsetX) / scale;
-  let sy = (fr.top - vr.top - offsetY) / scale;
-  let sw = fr.width / scale;
-  let sh = fr.height / scale;
-
-  // 外扩 10% margin：提升大二维码/条码边缘容错
+  // 扫描框 + 10% margin（外扩提升大二维码/条码边缘容错）
   const M = 0.10;
-  sw *= (1 + M);
-  sh *= (1 + M);
-  sx -= sw * M / 2;
-  sy -= sh * M / 2;
+  let sw = (L.frameW / L.scale) * (1 + M);
+  let sh = (L.frameH / L.scale) * (1 + M);
+  let sx = ((L.relX - L.offX) / L.scale) - sw * M / 2;
+  let sy = ((L.relY - L.offY) / L.scale) - sh * M / 2;
 
   // clamp 到视频边界
   sx = Math.max(0, sx);
@@ -612,6 +632,8 @@ async function startScan() {
     scanOverlay.style.display = 'none';
     btnStart.disabled = false;
     scanning = false;
+    if (focusWaitTimer) { clearTimeout(focusWaitTimer); focusWaitTimer = null; }
+    focusWaiting = false;
     setEngineBadge('');
   }
 }
@@ -689,6 +711,7 @@ async function handleScanResult(cands) {
     stopScan();
     const picked = await askUserPick(scored, '识别到单号，请确认后录入');
     if (picked) addScanItem(picked.text, picked.format, true);
+    else showToast('已取消录入，可重新扫描', 2000);
     return true;                            // 已出现合格候选（含用户取消）
   }
 
@@ -755,7 +778,7 @@ function releaseWakeLock() {
 
 // ---------- OCR 兜底（Tesseract.js 本地 + AI 视觉 API） ----------
 
-// 懒加载 Tesseract worker 单例
+// 懒加载 Tesseract worker 单例（失败自动复位，下次可重试）
 async function ensureOcrWorker() {
   if (!ocrWorkerPromise) {
     ocrWorkerPromise = (async () => {
@@ -767,6 +790,8 @@ async function ensureOcrWorker() {
         logger: () => {}
       });
     })();
+    // CDN/网络抖动导致加载失败时复位，允许下次重试
+    ocrWorkerPromise.catch(() => { ocrWorkerPromise = null; });
   }
   return ocrWorkerPromise;
 }
@@ -795,27 +820,30 @@ async function runOCRFallback() {
     const canvas = captureROI();   // 快照当前帧
     if (!canvas) return;
     let text = '';
+    let method = 'OCR';
     if (getSettings().ocrEnabled) {
       showToast('条码未识别，正在本地 OCR…', 0);
       text = await ocrRecognize(canvas);
     }
     if (!text && aiReady()) {
       showToast('OCR 无结果，正在 AI 识别…', 0);
+      method = 'AI';
       text = await aiRecognize(canvas);
     }
     if (text && scanning) {
       const rules = getActiveRules();
-      const r = scoreCandidate(text, 'OCR', rules);   // 经地区规则校验
+      const r = scoreCandidate(text, method, rules);   // 经地区规则校验
       if (r && r.score > 0) {
         stopScan();
-        const picked = await askUserPick([{ text, format: 'OCR', ...r }], 'OCR 识别结果，请确认');
-        if (picked) addScanItem(picked.text, 'OCR', true);
+        const picked = await askUserPick([{ text, format: method, ...r }], `${method} 识别结果，请确认`);
+        if (picked) addScanItem(picked.text, method, true);
       } else if (text) {
-        showToast('OCR 结果不符合单号规则', 2000);
+        showToast(`${method} 结果不符合单号规则`, 2000);
       }
     }
   } catch (e) {
-    showToast('OCR 识别失败：' + (e.message || e), 3000);
+    // 用户主动停止扫描导致 worker 终止时不弹错误提示
+    if (scanning) showToast('OCR 识别失败：' + (e.message || e), 3000);
   } finally {
     ocrBusy = false;
     hideToast();
@@ -912,19 +940,19 @@ function copyTrackingNos() {
 
 function exportCSV() {
   if (results.length === 0) { showToast('无数据可导出', 2000); return; }
-  const header = '日期,时间,物流单号,候选单号,条码格式,条码内容,备注,状态\n';
-  const rows = results.map(r => {
+  const header = '序号,日期,时间,物流单号,候选单号,条码格式,识别,条码内容,备注\n';
+  // 按扫描顺序正序导出（序号 1 = 最早扫描，在第一行）
+  const rows = [...results].reverse().map((r, i) => {
     const t = new Date(r.timestamp);
     const time = `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}:${String(t.getSeconds()).padStart(2,'0')}`;
-    const status = r.trackingNo ? '有效' : (r.invalidTrackingNo ? '待校验' : '空');
     return [
-      r.date, time,
+      i + 1, r.date, time,
       r.trackingNo || '',
       r.invalidTrackingNo || '',
       formatLabel(r.format),
+      recognitionMethod(r.format),
       r.rawText || '',
-      r.note || '',
-      status
+      r.note || ''
     ].map(f => `"${String(f).replace(/"/g, '""')}"`).join(',');
   }).join('\n');
   const csv = '\ufeff' + header + rows;
@@ -941,6 +969,7 @@ function deleteSelected() {
   if (results.length === 0) { showToast('无数据', 1500); return; }
   const checked = [...document.querySelectorAll('.row-check:checked')].map(cb => cb.dataset.id);
   if (checked.length === 0) { showToast('未选择任何行', 1500); return; }
+  if (!confirm(`确定删除选中的 ${checked.length} 条？此操作不可撤销。`)) return;
   const idSet = new Set(checked);
   for (let i = results.length - 1; i >= 0; i--) {
     if (idSet.has(results[i].id)) results.splice(i, 1);
