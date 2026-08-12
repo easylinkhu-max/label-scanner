@@ -141,6 +141,15 @@
     color: var(--err); border-color: var(--err);
   }
   .controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+  /* OCR 引擎状态与使用提示 */
+  .ocr-status {
+    padding: 4px 16px 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .ocr-status.loading { color: var(--warn); }
+  .ocr-status.ready { color: var(--ok); }
+  .ocr-status.error { color: var(--err); cursor: pointer; text-decoration: underline; }
   .torch-btn {
     position: absolute; top: 12px; right: 12px;
     background: rgba(0,0,0,0.5); color: #fff;
@@ -269,9 +278,11 @@
   <div class="controls">
     <button class="primary" id="btn-start">▶ 扫描</button>
     <button id="btn-pause" disabled title="暂停/继续扫描">暂停</button>
-    <button id="btn-ocr" disabled title="对当前画面手动 OCR 识别">OCR</button>
+    <button id="btn-ocr" disabled title="对准面单文字后手动 OCR 识别，识别结果点击即可复制">OCR</button>
     <button id="btn-torch-toggle" disabled title="打光">打光</button>
   </div>
+  <!-- OCR 引擎状态与使用提示 -->
+  <div class="ocr-status" id="ocr-status">OCR 引擎准备中…</div>
 </div>
 
 <!-- 第二行：复制 / 导出 / 新建 / 删除 / 图片 -->
@@ -308,11 +319,18 @@
 <div class="modal hidden" id="settings-modal">
   <div class="modal-box">
     <h3>设置</h3>
-    <div class="set-row"><label class="set-label">本地 OCR 兜底（Tesseract.js，按需加载）</label><input type="checkbox" id="set-ocr" checked></div>
-    <div class="set-row"><label class="set-label">AI 视觉兜底（图片将上传到配置的服务）</label><input type="checkbox" id="set-ai"></div>
-    <div class="set-field"><label>API Base URL</label><input type="text" id="set-base" placeholder="https://opencode.ai/zen/go/v1"></div>
+    <div class="set-row"><label class="set-label">本地 OCR 识别（Tesseract.js，打开网页自动预载）</label><input type="checkbox" id="set-ocr" checked></div>
+    <div class="set-row"><label class="set-label">AI 视觉识别（图片将上传到配置的服务）</label><input type="checkbox" id="set-ai"></div>
+    <div class="set-field"><label>AI 服务（选择自动填入地址与模型）</label>
+      <select id="set-service" style="width:100%;margin-top:4px;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;color:var(--text);background:var(--card)">
+        <option value="openrouter">OpenRouter（默认）</option>
+        <option value="groq">Groq</option>
+      </select>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin:4px 0 8px">AI 需浏览器直连，服务必须支持 CORS（默认 OpenRouter / Groq）；填写 API Key 后可点「测试连接」验证</div>
+    <div class="set-field"><label>API Base URL</label><input type="text" id="set-base" placeholder="https://openrouter.ai/api/v1"></div>
     <div class="set-field"><label>API Key</label><input type="password" id="set-key" placeholder="sk-…"></div>
-    <div class="set-field"><label>模型名称</label><input type="text" id="set-model" placeholder="mimo-v2.5"></div>
+    <div class="set-field"><label>模型名称</label><input type="text" id="set-model" placeholder="google/gemini-2.0-flash-001"></div>
     <div class="modal-actions">
       <button id="btn-settings-save">保存</button>
       <button id="btn-settings-test">测试连接</button>
@@ -321,6 +339,6 @@
   </div>
 </div>
 
-<script src="app.js?v=14"></script>
+<script src="app.js?v=15"></script>
 </body>
 </html>
