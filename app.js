@@ -10,10 +10,13 @@
 const STORAGE_KEY = 'labelScannerResults';
 const SETTINGS_KEY = 'labelScannerSettings';
 const FOCUS_WAIT_MS = 2000;      // 扫描前手动对焦等待
-const OCR_TRIGGER_FRAMES = 12;   // 连续无结果帧数触发 OCR（约 0.4-0.8s）
-const OCR_MIN_INTERVAL = 3000;   // 两次 OCR 最小间隔
 const IMAGE_MAX_SIDE = 1600;     // 本地图片识别时缩放长边上限（兼顾速度与识别率）
-const DEFAULT_SETTINGS = { aiEnabled: false, aiBaseUrl: 'https://opencode.ai/zen/go/v1', aiApiKey: '', aiModel: 'mimo-v2.5', ocrEnabled: true };
+// AI 服务预设（设置里二选一自动填入；都支持浏览器直连 CORS）
+const AI_SERVICES = {
+  openrouter: { base: 'https://openrouter.ai/api/v1', model: 'google/gemini-2.0-flash-001' },
+  groq: { base: 'https://api.groq.com/openai/v1', model: 'llama-3.2-11b-vision-preview' }
+};
+const DEFAULT_SETTINGS = { aiEnabled: false, aiBaseUrl: AI_SERVICES.openrouter.base, aiApiKey: '', aiModel: AI_SERVICES.openrouter.model, ocrEnabled: true };
 
 // ---------- 状态 ----------
 
@@ -29,8 +32,6 @@ let slowStreak = 0;
 let fastStreak = 0;
 let focusWaiting = false;  // 对焦等待期（扫描循环不启动）
 let focusWaitTimer = null;
-let noResultStreak = 0;    // 连续无合格结果帧数
-let lastOcrAt = 0;         // 上次 OCR 触发时间戳
 let ocrBusy = false;       // OCR 运行中（暂停扫描循环）
 let ocrWorkerPromise = null;
 let imageBusy = false;     // 图片识别进行中（防重入 + 拦截扫描）
@@ -540,21 +541,9 @@ async function scanTick() {
   try {
     // 两引擎统一：只解码扫描框区域（含 10% margin）
     const source = captureROI();
-    let hadQualified = false;
     if (source) {
       const cands = await engine.decode(source);
-      if (cands && cands.length) hadQualified = await handleScanResult(cands);
-    }
-    // 连续无合格结果计数
-    noResultStreak = hadQualified ? 0 : noResultStreak + 1;
-
-    // 节流触发 OCR 兜底（条码/二维码识别失败时识别面单数字）
-    const now = Date.now();
-    if (noResultStreak >= OCR_TRIGGER_FRAMES && now - lastOcrAt >= OCR_MIN_INTERVAL) {
-      noResultStreak = 0;
-      lastOcrAt = now;
-      runOCRFallback();   // 同步置 ocrBusy=true，不 await；OCR 完成后恢复循环
-      return;
+      if (cands && cands.length) await handleScanResult(cands);
     }
   } catch (e) {
     // 单帧失败不中断循环
@@ -665,10 +654,9 @@ function stopScan() {
   slowMode = false;
   slowStreak = 0;
   fastStreak = 0;
-  noResultStreak = 0;
   if (focusWaitTimer) { clearTimeout(focusWaitTimer); focusWaitTimer = null; }
   focusWaiting = false;
-  terminateOcrWorker();
+  // 注意：不 terminate OCR worker —— 页面加载时已后台预载，保留供手动 OCR 即点即用
 
   try { if (engine) engine.destroy(); } catch (e) {}
   engine = null;
@@ -709,20 +697,27 @@ function togglePause() {
   }
 }
 
-// 手动 OCR：对当前扫描框画面执行 OCR/AI 兜底识别
+// 手动 OCR：对当前扫描框画面执行 OCR/AI 识别，结果弹窗展示（点击即复制）
 async function manualOCR() {
   if (!scanning) { showToast('请先开始扫描', 2000); return; }
   if (ocrBusy || imageBusy) return;
   ocrBusy = true;
+  showToast('正在识别文字…', 0);
   try {
     const canvas = captureROI();
     if (!canvas) return;
-    await ocrFallbackOnCanvas(canvas, false);   // 手动场景：始终处理结果
+    const r = await recognizeText(canvas);
+    hideToast();
+    if (!r) {
+      showToast('未识别到文字，请对准文字后重试', 3000);
+      return;
+    }
+    showRecognitionDialog(r);   // 手动场景：总是弹窗展示全文，可点击复制 / 录入单号
   } catch (e) {
+    hideToast();
     if (scanning) showToast('OCR 失败：' + (e.message || e), 4000);
   } finally {
     ocrBusy = false;
-    hideToast();
     if (scanning && !paused) scheduleScan();
   }
 }
@@ -834,7 +829,7 @@ function releaseWakeLock() {
   }
 }
 
-// ---------- OCR 兜底（Tesseract.js 本地 + AI 视觉 API） ----------
+// ---------- OCR（Tesseract.js，手动触发）+ AI 视觉 API ----------
 
 // 懒加载 Tesseract worker 单例（失败自动复位，下次可重试）
 async function ensureOcrWorker() {
@@ -854,67 +849,137 @@ async function ensureOcrWorker() {
   return ocrWorkerPromise;
 }
 
+// 自由识别文字：整块文字（PSM 6）+ 不设白名单，返回完整识别文本（字母/数字/标点均可）
 async function ocrRecognize(canvas) {
   const worker = await ensureOcrWorker();
   const { data } = await worker.recognize(canvas, {
-    tessedit_pageseg_mode: '7',   // PSM 7 单行
-    tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    tessedit_pageseg_mode: '6'   // 假定为统一文本块，保留多行与标点
   });
-  return extractTrackingFromText(data.text);
+  return (data.text || '').trim();
 }
 
-async function terminateOcrWorker() {
-  if (ocrWorkerPromise) {
-    const w = await ocrWorkerPromise.catch(() => null);
-    if (w) { try { await w.terminate(); } catch (e) {} }
-    ocrWorkerPromise = null;
-  }
-}
-
-// OCR/AI 兜底公共函数：对给定 canvas 识别 → 地区规则校验 → 确认弹窗 → 入库
-// guardScanning=true（摄像头路径）：识别期间用户已停止则丢弃结果；false（图片路径）：始终处理
-// 返回状态：'added' 已入库 | 'invalid' 有文本但不符合规则/用户取消 | 'none' 无结果
-async function ocrFallbackOnCanvas(canvas, guardScanning = false) {
+// OCR/AI 统一识别入口：优先本地 OCR，无结果且已配置 AI 时用 AI。
+// 返回 { tracking, fullText, method }；两者都无结果返回 null
+async function recognizeText(canvas) {
   let text = '';
   let method = 'OCR';
   if (getSettings().ocrEnabled) {
-    showToast('未识别到条码，正在本地 OCR…', 0);
     text = await ocrRecognize(canvas);
   }
   if (!text && aiReady()) {
-    showToast('OCR 无结果，正在 AI 识别…', 0);
+    showToast('本地 OCR 无结果，正在 AI 识别…', 0);
     method = 'AI';
     text = await aiRecognize(canvas);
   }
-  if (!text) return 'none';
-  if (guardScanning && !scanning) return 'none';   // 摄像头场景：已停止则丢弃
-  const rules = getActiveRules();
-  const r = scoreCandidate(text, method, rules);
-  if (r && r.score > 0) {
-    stopScan();   // 摄像头场景先停相机再弹窗；无扫描时是 no-op
-    const picked = await askUserPick([{ text, format: method, ...r }], `${method} 识别结果，请确认`);
-    if (picked) { addScanItem(picked.text, method, true); return 'added'; }
-    showToast('已取消录入', 4000);
-    return 'invalid';
-  }
-  showToast(`${method} 结果不符合单号规则`, 4000);
-  return 'invalid';
+  if (!text) return null;
+  return parseRecognition(text, method);
 }
 
-// OCR 兜底入口（摄像头路径）：暂停扫描循环 → 取帧 → 公共函数 → 恢复循环
-async function runOCRFallback() {
-  ocrBusy = true;   // 同步置位，暂停扫描循环
+// 从识别文本解析 { tracking, fullText }：AI 输出 JSON 优先；OCR 全文原样保留 + 正则抽单号
+function parseRecognition(text, method) {
+  const fullText = String(text).trim();
+  let tracking = '';
+  const jm = fullText.match(/\{[\s\S]*\}/);
+  if (jm) {
+    try {
+      const p = JSON.parse(jm[0]);
+      tracking = String(p.trackingNo || p.tracking_no || p.tracking || '').trim().toUpperCase();
+      const ft = String(p.fullText || '').trim();
+      if (!tracking) {
+        // JSON 里没有单号字段时，对全文兜底正则提取
+        const m = ft.match(/[A-Z]{0,3}\d{9,}/i) || ft.match(/\b\d{8,16}\b/);
+        tracking = m ? m[0].toUpperCase() : '';
+      }
+      return { tracking, fullText: ft || fullText, method };
+    } catch (e) {}
+  }
+  const m = fullText.match(/[A-Z]{0,3}\d{9,}/i) || fullText.match(/\b\d{8,16}\b/);
+  return { tracking: m ? m[0].toUpperCase() : '', fullText, method };
+}
+
+// 识别结果弹窗：全文点击即复制（提示「已复制」）；提取到单号时可一键录入
+function showRecognitionDialog(r) {
+  const copyFullText = async () => {
+    try {
+      await navigator.clipboard.writeText(r.fullText);
+    } catch (e) {
+      const ta = document.createElement('textarea');
+      ta.value = r.fullText;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    showToast('已复制 ✓', 2000);
+  };
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;display:flex;align-items:center;justify-content:center;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:12px;padding:16px;max-width:360px;width:90%;max-height:80vh;display:flex;flex-direction:column;';
+  box.innerHTML = `<div style="font-size:15px;font-weight:600;margin-bottom:6px">识别结果 <span style="font-size:11px;color:#888;font-weight:400">(${r.method === 'AI' ? 'AI 识别' : 'OCR 识别'} · 点击文字即可复制)</span></div>`;
+  if (r.tracking) {
+    box.innerHTML += `<div style="margin:6px 0;padding:8px 10px;background:#e8f5e9;border:1px solid #c8e6c9;border-radius:8px">
+      <div style="font-size:11px;color:#2e7d32">检测到单号（可一键录入）</div>
+      <div style="font-family:Consolas,monospace;font-weight:600;font-size:14px;word-break:break-all">${escapeHTML(r.tracking)}</div>
+    </div>`;
+  }
+  const pre = document.createElement('pre');
+  pre.textContent = r.fullText;
+  pre.style.cssText = 'flex:1;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-family:Consolas,monospace;font-size:12px;line-height:1.5;background:#fafafa;border:1px solid #e0e0e0;border-radius:8px;padding:10px;margin:8px 0;cursor:pointer;user-select:text;-webkit-user-select:text;';
+  pre.title = '点击复制全文';
+  pre.addEventListener('click', copyFullText);
+  box.appendChild(pre);
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex;gap:8px;';
+  const mkBtn = (label, style, fn) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = `flex:1;padding:9px;border:1px solid #e0e0e0;border-radius:8px;font-size:13px;cursor:pointer;${style || ''}`;
+    b.addEventListener('click', fn);
+    return b;
+  };
+  actions.appendChild(mkBtn('复制全文', 'background:#4a90d9;color:#fff;border-color:#4a90d9;', copyFullText));
+  if (r.tracking) {
+    actions.appendChild(mkBtn('录入单号', 'background:#4caf50;color:#fff;border-color:#4caf50;', () => {
+      overlay.remove();
+      addScanItem(r.tracking, r.method, true);
+    }));
+  }
+  actions.appendChild(mkBtn('关闭', '', () => overlay.remove()));
+  box.appendChild(actions);
+  overlay.appendChild(box);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+// ---------- OCR 引擎预载（打开网页即后台下载，首次约 10MB，之后即点即用） ----------
+
+function setOcrStatus(state) {
+  const el = $('ocr-status');
+  if (!el) return;
+  if (state === 'loading') {
+    el.innerHTML = '⏳ OCR 引擎下载中…（约 10MB，仅首次，后台进行）';
+    el.className = 'ocr-status loading';
+  } else if (state === 'ready') {
+    el.innerHTML = '✓ OCR 引擎已就绪 —— 对准面单点「OCR」识别文字，识别结果点击即复制';
+    el.className = 'ocr-status ready';
+  } else if (state === 'error') {
+    el.innerHTML = '⚠ OCR 引擎下载失败，点此重试';
+    el.className = 'ocr-status error';
+  } else {
+    el.innerHTML = 'OCR 引擎未启用（可在设置中开启）';
+    el.className = 'ocr-status';
+  }
+}
+
+async function preloadOcrEngine() {
+  if (!getSettings().ocrEnabled) { setOcrStatus('off'); return; }
+  setOcrStatus('loading');
   try {
-    const canvas = captureROI();   // 快照当前帧
-    if (!canvas) return;
-    await ocrFallbackOnCanvas(canvas, true);
+    await ensureOcrWorker();
+    setOcrStatus('ready');
   } catch (e) {
-    // 用户主动停止扫描导致 worker 终止时不弹错误提示
-    if (scanning) showToast('OCR 识别失败：' + (e.message || e), 3000);
-  } finally {
-    ocrBusy = false;
-    hideToast();
-    if (scanning) scheduleScan();   // 恢复扫描循环
+    setOcrStatus('error');
   }
 }
 
@@ -932,19 +997,12 @@ function compressCanvas(canvas, maxSide = 1280, quality = 0.9) {
   return src.toDataURL('image/jpeg', quality);
 }
 
-// 从 OCR/AI 文本提取单号（JSON 优先 + 正则兜底）
-function extractTrackingFromText(text) {
-  if (!text) return '';
-  const jm = String(text).match(/\{[\s\S]*\}/);
-  if (jm) {
-    try {
-      const p = JSON.parse(jm[0]);
-      const t = String(p.trackingNo || p.tracking_no || p.tracking || '').trim();
-      if (t) return t.toUpperCase();
-    } catch (e) {}
-  }
-  const m = String(text).match(/[A-Z]{0,3}\d{9,}/i) || String(text).match(/\b\d{8,16}\b/);
-  return m ? m[0].toUpperCase() : '';
+// AI 视觉提示词：按当前地区规则生成，要求输出完整文字（供全文复制）与单号
+function buildVisionPrompt() {
+  const ph = regionSelect.value === 'PH';
+  return ph
+    ? '这是菲律宾物流面单（shipping label）图片。请识别图中所有可见文字。物流单号特征：0-3 个字母开头（如 JT、JD、LP）后接 9 位以上纯数字，总长 ≥12，无连字符/空格/标点。输出严格 JSON：{"trackingNo":"单号（没有则空字符串）","orderNo":"订单号","name":"收件人姓名","phone":"电话","fullText":"整张面单上所有可见文字，按行原样拼接，包含单号/姓名/地址等，不要省略也不要杜撰"}，不要输出 JSON 以外的内容。'
+    : '这是物流面单图片。请识别图中所有可见文字。物流单号特征：可选 0-3 个字母开头 + 至少 9 位数字（总长 ≥12），也可能是 8-16 位纯数字。输出严格 JSON：{"trackingNo":"单号（没有则空字符串）","orderNo":"订单号","name":"收件人姓名","phone":"电话","fullText":"整张面单上所有可见文字，按行原样拼接，包含单号/姓名/地址等，不要省略也不要杜撰"}，不要输出 JSON 以外的内容。';
 }
 
 // AI 视觉提示词：按当前地区规则生成
@@ -978,10 +1036,10 @@ async function aiRecognize(canvas) {
     });
     if (!resp.ok) throw new Error(`AI API ${resp.status}: ${(await resp.text().catch(() => '')).slice(0, 200)}`);
     const json = await resp.json();
-    return extractTrackingFromText(json.choices?.[0]?.message?.content || '');
+    return json.choices?.[0]?.message?.content || '';
   } catch (e) {
     if (e.name === 'AbortError') throw new Error('AI 请求超时(30s)');
-    if (isCorsError(e)) throw new Error('目标服务不支持跨域（CORS），浏览器无法直连；请更换支持 CORS 的 AI 服务地址');
+    if (isCorsError(e)) throw new Error('目标服务不支持跨域（CORS），浏览器无法直连；请使用支持 CORS 的服务（默认 OpenRouter / Groq）');
     throw e;
   } finally { clearTimeout(timer); }
 }
@@ -1039,14 +1097,25 @@ async function recognizeImageFile(file) {
       if (ok) return;   // 已弹窗/入库，成功 toast 由 addScanItem 设置
     }
 
-    // 5) 无合格候选：OCR/AI 兜底
-    const status = await ocrFallbackOnCanvas(canvas, false);
-    if (status === 'none') {
-      const hint = (!getSettings().ocrEnabled && !aiReady())
-        ? '；可到设置开启 OCR/AI 兜底后重试'
-        : '；请尝试更清晰的图片或重新截图';
-      showToast('未识别到条码或单号' + hint, 3000);
+    // 5) 无合格候选：OCR/AI 识别文字
+    showToast('正在识别图片文字…', 0);
+    const r = await recognizeText(canvas);
+    hideToast();
+    if (!r) {
+      showToast('未识别到条码或文字，请尝试更清晰的图片', 3000);
+      return;
     }
+    if (r.tracking) {
+      // 提取到合格单号：沿用确认入库流程
+      const scored = scoreCandidate(r.tracking, r.method, getActiveRules());
+      if (scored && scored.score > 0) {
+        const picked = await askUserPick([{ text: r.tracking, format: r.method, ...scored }], '识别到单号，请确认后录入');
+        if (picked) addScanItem(picked.text, r.method, true);
+        return;
+      }
+    }
+    // 无合格单号：弹窗展示全文，点击复制
+    showRecognitionDialog(r);
   } catch (e) {
     console.error('[图片识别] 失败:', e);
     showToast('图片识别失败：' + (e.message || e), 3000);
@@ -1159,6 +1228,10 @@ function openSettings() {
   $('set-base').value = s.aiBaseUrl;
   $('set-key').value = s.aiApiKey;
   $('set-model').value = s.aiModel;
+  // 服务下拉与当前地址同步（识别不出则默认 OpenRouter）
+  const base = (s.aiBaseUrl || '').replace(/\/+$/, '');
+  const cur = Object.entries(AI_SERVICES).find(([, v]) => v.base === base);
+  $('set-service').value = cur ? cur[0] : 'openrouter';
   settingsModal.classList.remove('hidden');
 }
 function closeSettings() {
@@ -1167,6 +1240,13 @@ function closeSettings() {
 
 $('btn-settings').addEventListener('click', openSettings);
 $('btn-settings-cancel').addEventListener('click', closeSettings);
+// 选择 AI 服务自动填入 Base URL 与模型（支持浏览器直连 CORS），用户只需填 Key
+$('set-service').addEventListener('change', e => {
+  const svc = AI_SERVICES[e.target.value];
+  if (!svc) return;
+  $('set-base').value = svc.base;
+  $('set-model').value = svc.model;
+});
 $('btn-settings-save').addEventListener('click', () => {
   const s = {
     ocrEnabled: $('set-ocr').checked,
@@ -1202,7 +1282,7 @@ $('btn-settings-test').addEventListener('click', async () => {
     clearTimeout(timer);
     showToast(resp.ok ? '连接成功 ✓' : `连接失败 (${resp.status})`, 4000);
   } catch (e) {
-    showToast(isCorsError(e) ? '连接失败：目标服务不支持跨域（CORS），请更换支持 CORS 的 AI 服务' : '连接失败：' + (e.message || e), 4000);
+    showToast(isCorsError(e) ? '连接失败：目标服务不支持跨域（CORS），请使用支持 CORS 的服务（默认 OpenRouter / Groq）' : '连接失败：' + (e.message || e), 4000);
   } finally {
     btn.disabled = false;
   }
@@ -1303,3 +1383,9 @@ document.addEventListener('visibilitychange', () => {
 // ---------- 初始化 ----------
 
 render();
+
+// 打开网页即后台预载 OCR 引擎；下载失败可点击状态条重试
+preloadOcrEngine();
+$('ocr-status').addEventListener('click', () => {
+  if ($('ocr-status').classList.contains('error')) preloadOcrEngine();
+});
